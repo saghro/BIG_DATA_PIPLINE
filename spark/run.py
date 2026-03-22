@@ -1,8 +1,8 @@
 from engine import RedditInferenceEngine
 
 if __name__ == "__main__":
-    print("🚀 Initialisation du moteur d'inférence Reddit...")
+    print("🚀 Starting Mastodon Streaming Engine...")
     
-    # Création et lancement du moteur
+    # Create and run the streaming engine
     engine = RedditInferenceEngine()
     engine.run()

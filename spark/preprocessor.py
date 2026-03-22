@@ -1,4 +1,3 @@
-import requests
 import pandas as pd
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col, regexp_replace, trim, lower, year, month, dayofmonth, hour, dayofweek, dayofyear, pandas_udf
@@ -8,7 +7,7 @@ import config
 
 class DataPreprocessor:
     """
-    Classe responsable du nettoyage, tokenization, feature engineering et appel API.
+    Classe responsable du nettoyage, tokenization, feature engineering et analyse de sentiment.
     """
     
     def clean_text(self, df: DataFrame) -> DataFrame:
@@ -43,14 +42,25 @@ class DataPreprocessor:
     @staticmethod
     @pandas_udf(StringType())
     def get_sentiment_udf(series: pd.Series) -> pd.Series:
-        """Appel API optimisé (Batch)."""
-        texts = series.tolist()
-        if not texts: return pd.Series([], dtype="string")
-        try:
-            response = requests.post(config.API_URL, json={"texts": texts}, timeout=5)
-            if response.status_code == 200:
-                return pd.Series(response.json()["labels"])
-        except Exception as e:
-            # En prod, on pourrait logger l'erreur ici
-            pass
-        return pd.Series(["neutral"] * len(texts))
+        """Analyse de sentiment simple basée sur des mots-clés."""
+        positive_words = ['bullish', 'moon', 'hodl', 'buy', 'good', 'amazing', 'future', 'great', 'excellent']
+        negative_words = ['dip', 'sell', 'crash', 'bad', 'volatile', 'risky', 'terrible', 'worst']
+        
+        sentiments = []
+        for text in series:
+            if pd.isna(text):
+                sentiments.append('Neutral')
+                continue
+                
+            text_lower = str(text).lower()
+            pos_count = sum(1 for word in positive_words if word in text_lower)
+            neg_count = sum(1 for word in negative_words if word in text_lower)
+            
+            if pos_count > neg_count:
+                sentiments.append('Positive')
+            elif neg_count > pos_count:
+                sentiments.append('Negative')
+            else:
+                sentiments.append('Neutral')
+        
+        return pd.Series(sentiments)

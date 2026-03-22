@@ -5,13 +5,16 @@ USER root
 RUN groupadd -g 999 docker || true && \
     usermod -aG docker airflow
 
+# Install Docker Client
+RUN apt-get update && apt-get install -y docker.io && apt-get clean
+
 USER airflow
 RUN pip install --no-cache-dir \
     requests \
-    azure-storage-file-datalake \
     praw==7.8.1 \
     python-dotenv \
-    kafka-python
+    kafka-python \
+    Mastodon.py
 
 USER airflow
 

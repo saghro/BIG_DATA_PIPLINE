@@ -37,6 +37,8 @@ services:
         - CASSANDRA_CLUSTER_NAME=RedditCluster
         - CASSANDRA_DC=datacenter1
         - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+        - MAX_HEAP_SIZE=512M
+        - HEAP_NEWSIZE=100M
       volumes:
         - cassandra_data:/var/lib/cassandra
       healthcheck:
@@ -72,7 +74,7 @@ services:
       SPARK_MODE: master
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"] # commande executer a chaque fois que le conteneur démarre
     ports:
-      - "8080:8080"
+      - "8083:8080"
       - "7077:7077"
     volumes:
       - ./spark:/opt/spark/work-dir
@@ -93,7 +95,7 @@ services:
       SPARK_MODE: worker
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
     ports:
-      - "8081:8081"
+      - "8084:8081"
     volumes:
       - ./spark:/opt/spark/work-dir
       - ./models:/opt/spark/models
@@ -101,14 +103,20 @@ services:
       - spark-master
       - cassandra
   
-  sentiment-api:
-    build:
-      context: ./distilbert_fin
-      dockerfile: Dockerfile
-    container_name: sentiment-container
-    image: sentiment-api:latest
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
     ports:
-      - "8000:8000"
+      - "27018:27017"  # Changed to 27018 to avoid conflict with local MongoDB
+    environment:
+      MONGO_INITDB_DATABASE: reddit_backup_local
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   airflow-init:
       image: apache/airflow:2.7.1
@@ -148,7 +156,7 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__WEBSERVER__RBAC: 'true'
       AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
-      _PIP_ADDITIONAL_REQUIREMENTS: "requests azure-storage-file-datalake praw==7.8.1 python-dotenv kafka-python"
+      _PIP_ADDITIONAL_REQUIREMENTS: "requests praw==7.8.1 python-dotenv kafka-python Mastodon.py"
     ports:
       - "8091:8080"
     volumes:
@@ -172,7 +180,7 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
-      _PIP_ADDITIONAL_REQUIREMENTS: "requests azure-storage-file-datalake praw==7.8.1 python-dotenv kafka-python"
+      _PIP_ADDITIONAL_REQUIREMENTS: "requests praw==7.8.1 python-dotenv kafka-python Mastodon.py"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./main:/opt/airflow/main  
@@ -190,4 +198,5 @@ networks:
 volumes:
   kafka_data:
   cassandra_data:
+  mongodb_data:
   airflow-db:

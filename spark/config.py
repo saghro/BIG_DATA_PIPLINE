@@ -1,4 +1,4 @@
-KAFKA_TOPIC = "Reddit_Data"
+KAFKA_TOPIC = "Mastodon_Data"
 KAFKA_BROKER_URL = "broker:9092"
 PARTITIONS = 1
 REPLICATION_FACTOR = 1
@@ -13,8 +13,6 @@ MODEL_PATHS = {
     "sentiment": "/opt/spark/models/sentiment_indexer_model",
     "rf": "/opt/spark/models/random_forest_model"
 }
-
-API_URL = "http://sentiment-container:8000/predict"
 
 STOPWORDS = [
     "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "aren't", "as", "at",

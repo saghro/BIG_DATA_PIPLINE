@@ -1,0 +1,48 @@
+graph TB
+    subgraph Sources["📡 Sources de Données"]
+        Mastodon["🐘 Mastodon<br/>Public Timeline<br/>Instance: mastodon.social"]
+    end
+    
+    subgraph Docker["🐳 Docker Compose Environment"]
+        Kafka["📨 Kafka<br/>Message Broker<br/>Topic: Mastodon_Data"]
+        Spark["⚡ Spark Streaming<br/>Real-time Processing<br/>NLP + ML Models"]
+        HF["🤗 Hugging Face<br/>Sentiment Analysis<br/>DistilRoBERTa"]
+        Airflow["🔄 Airflow<br/>Orchestration<br/>DAG: mastodon_pipeline"]
+    end
+    
+    subgraph Storage["💾 Stockage"]
+        Cassandra["🗄️ Cassandra<br/>Primary Storage<br/>Keyspace: reddit_keyspace"]
+        MongoDB["🍃 MongoDB<br/>Fallback Storage<br/>Zero Data Loss"]
+    end
+    
+    subgraph Visualization["📊 Visualisation"]
+        Dashboard["📈 Dashboard BI<br/>Streamlit<br/>Real-time Monitor"]
+        PowerBI["📊 Power BI<br/>Business Intelligence<br/>Export CSV"]
+    end
+    
+    %% Flux principaux
+    Mastodon -->|"Stream Posts"| Kafka
+    Kafka -->|"Consume Messages"| Spark
+    Spark <-->|"Sentiment API"| HF
+    Airflow -.->|"Orchestrate"| Spark
+    Spark -->|"Primary Write"| Cassandra
+    Spark -->|"Fallback Write"| MongoDB
+    Cassandra -->|"Query Data"| Dashboard
+    MongoDB -->|"Query Data"| Dashboard
+    Cassandra -->|"Export CSV"| PowerBI
+    MongoDB -->|"Export CSV"| PowerBI
+    
+    %% Styles
+    style Mastodon fill:#6364FF,stroke:#4A4AFF,stroke-width:3px,color:#fff
+    style Kafka fill:#231F20,stroke:#000,stroke-width:2px,color:#fff
+    style Spark fill:#E25A1C,stroke:#C94A0F,stroke-width:2px,color:#fff
+    style HF fill:#FFD21E,stroke:#E6B800,stroke-width:2px
+    style Airflow fill:#E4392C,stroke:#C02A1F,stroke-width:2px,color:#fff
+    style Cassandra fill:#1287B1,stroke:#0E6B8A,stroke-width:2px,color:#fff
+    style MongoDB fill:#47A248,stroke:#3A8539,stroke-width:2px,color:#fff
+    style Dashboard fill:#FF4B4B,stroke:#E63939,stroke-width:2px,color:#fff
+    style PowerBI fill:#F2C811,stroke:#D4B00F,stroke-width:2px
+    
+    style Docker fill:#E3F2FD,stroke:#1976D2,stroke-width:3px
+    style Storage fill:#E8F5E9,stroke:#4CAF50,stroke-width:2px
+    style Visualization fill:#FFF3E0,stroke:#FF9800,stroke-width:2px

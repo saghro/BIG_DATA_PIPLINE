@@ -2,27 +2,17 @@ from dotenv import load_dotenv
 import os
 load_dotenv()
 
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-USER_AGENT = os.getenv("USER_AGENT")
-USERNAME = os.getenv("USERNAME")
-PASSWORD = os.getenv("PASSWORD")
+# MASTODON CONFIGURATION (No API keys needed!)
+MASTODON_INSTANCE = "https://mastodon.social"  # Popular instance with crypto discussions
 
-KAFKA_TOPIC = "Reddit_Data"
-KAFKA_BROKER_URL = os.getenv("KAFKA_BROKER_URL")
+KAFKA_TOPIC = "Mastodon_Data"
+KAFKA_BROKER_URL = os.getenv("KAFKA_BROKER_URL", "broker:9092")
 PARTITIONS = 1
 REPLICATION_FACTOR = 1
 
-SUBREDDITS = "cryptocurrency+Bitcoin+Ethereum+altcoin+CryptoMarkets+ethtrader+CryptoTechnology+CryptoCurrencyNews+DeFi+CryptoMoonShots+Dogecoin+Cardano+Solana+ShibaInu"
+# Keywords to filter posts (crypto/tech related)
 KEYWORDS = [
-    "crypto", "cryptocurrency", "bitcoin", "btc", "ethereum", "eth",
-    "blockchain", "altcoin", "token", "defi", "nft", "smart contract",
-    "mining", "miner", "hash rate", "wallet", "hardware wallet", "cold storage",
-    "staking", "yield farming", "airdrop", "ico", "ido", "web3",
-    "dogecoin", "doge", "cardano", "ada", "solana", "sol", "shiba inu", "shib"
+    "bitcoin", "btc", "ethereum", "eth", "crypto", "cryptocurrency",
+    "blockchain", "defi", "nft", "web3", "solana", "cardano",
+    "dogecoin", "doge", "altcoin", "trading", "hodl", "moon"
 ]
-
-
-
-AZURE_CONNECTION_STRING = os.getenv("CHAINE_AZURE_DATALAKE")
-AZURE_CONTAINER_NAME = "reddit-raw-data"

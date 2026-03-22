@@ -1,0 +1,320 @@
+% Rapport LaTeX - Pipeline Big Data Mastodon/Reddit (version détaillée)
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[french]{babel}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\geometry{margin=2.5cm}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\lstset{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny
+}
+
+\title{\textbf{Pipeline Big Data en temps réel\\Sentiment \& Viralité sur Mastodon/Reddit}}
+\author{
+  saghro (maintainer du dépôt \texttt{BIG\_DATA\_PIPLINE})\\
+  \small\textit{Basé sur un projet de groupe ; auteurs initiaux : EL RHERBI M.A., CHATRAOUI H., DHAH C., EL Houdaigui M., AMMAM Y.}
+}
+\date{\today}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+\newpage
+\setcounter{page}{1}
+
+\begin{abstract}
+Ce rapport décrit en détail un pipeline Big Data de bout en bout conçu pour ingérer des discussions issues de Mastodon (timeline publique), les traiter en temps réel avec Apache Spark (Streaming, NLP, ML) et les stocker dans une architecture hybride (Cassandra en primaire, MongoDB en secours). L'orchestration est assurée par Apache Airflow et la visualisation par des tableaux de bord (Streamlit, Power BI). Le projet vise la détection de tendances virales et l'analyse de sentiment sur des contenus liés à la finance et aux cryptomonnaies, avec un objectif de zéro perte de données grâce au mécanisme de fallback. Ce document détaille l'architecture, les formats de données, les configurations, le code clé et les procédures de lancement et de dépannage.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%==============================================================================
+\section{Introduction}
+%==============================================================================
+
+\subsection{Contexte et motivation}
+
+Le projet \emph{Reddit Real-Time Sentiment \& Virality Pipeline} est un système d'ingénierie Big Data qui traite des flux de publications en temps réel. Initialement pensé pour Reddit (sous-reddits r/Bitcoin, r/CryptoCurrency), il a été étendu à \textbf{Mastodon} pour l'ingestion, ce qui permet de s'affranchir de clés API et d'utiliser une instance publique (\texttt{mastodon.social}) pour des démonstrations et des tests sans démarches d'authentification.
+
+Les objectifs principaux sont~:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Ingestion} : récupérer des posts en continu depuis la timeline publique Mastodon, filtrer par mots-clés (crypto, bitcoin, etc.) et les envoyer vers Kafka.
+  \item \textbf{Traitement} : analyse de sentiment (Positive/Négatif/Neutre), modélisation de sujets (LDA), prédiction de viralité (Random Forest) via Spark Structured Streaming.
+  \item \textbf{Stockage} : écriture prioritaire dans Apache Cassandra, avec bascule automatique vers MongoDB en cas d'échec (zéro perte de données).
+  \item \textbf{Orchestration} : Apache Airflow pour enchaîner ingestion et job Spark.
+  \item \textbf{Visualisation} : tableaux de bord (Streamlit, Power BI) connectés aux données stockées.
+\end{itemize}
+
+\subsection{Périmètre du document}
+
+Ce rapport détaille~: l'architecture technique et le flux de données~; les formats des messages (Mastodon, Kafka, Cassandra)~; la configuration (Kafka, Spark, Cassandra, MongoDB, Airflow)~; le code des modules d'ingestion, de prétraitement et du moteur d'inférence Spark~; la structure du projet~; les procédures de lancement et de vérification~; et des pistes de dépannage.
+
+%==============================================================================
+\section{Architecture technique}
+%==============================================================================
+
+\subsection{Vue d'ensemble}
+
+L'infrastructure est entièrement conteneurisée avec \textbf{Docker Compose}. Le réseau interne \texttt{reddit-network} (bridge) permet aux conteneurs de communiquer par nom de service. La figure ci-dessous résume les briques et les ports exposés sur l'hôte.
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Service} & \textbf{Rôle} & \textbf{Port(s) hôte} \\
+    \midrule
+    broker (Kafka) & Bus d'événements, topic \texttt{Mastodon\_Data} & 9092 (interne), 9093 (externe) \\
+    spark-master & Coordinateur du cluster Spark & 8083 (UI), 7077 (driver) \\
+    spark-worker & Exécution des tâches Spark & 8084 \\
+    cassandra & Stockage NoSQL primaire & 9042 \\
+    cassandra-init & Exécution du script \texttt{init.cql} au démarrage & --- \\
+    mongodb & Stockage document fallback & 27018 \\
+    airflow-webserver & Interface web Airflow & 8091 \\
+    airflow-scheduler & Planification des DAGs & --- \\
+    airflow-postgres & Métadonnées Airflow & 5432 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Services Docker du pipeline et ports}
+\end{table}
+
+\subsection{Flux de données détaillé}
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Mastodon $\rightarrow$ Kafka} \\
+  Un script Python (\texttt{mastodon\_ingestion.py}) se connecte à l'API publique de Mastodon, écoute le flux \emph{public timeline} via \texttt{stream\_public}, et pour chaque statut reçu vérifie si le texte contient au moins un mot-clé (liste configurable). Les posts retenus sont normalisés (id, author, instance, text nettoyé du HTML, timestamp, score = favourites + reblogs), sérialisés en JSON et envoyés au topic \texttt{Mastodon\_Data} avec un \texttt{KafkaProducer}.
+  \item \textbf{Kafka $\rightarrow$ Spark} \\
+  Spark Structured Streaming lit le topic avec \texttt{startingOffsets: earliest} et \texttt{maxOffsetsPerTrigger: 50}. Les messages (clé/valeur) sont parsés : \texttt{CAST(value AS STRING)} puis \texttt{from\_json(..., schema)} pour obtenir les colonnes \texttt{id}, \texttt{author}, \texttt{subreddit}, \texttt{text}, \texttt{timestamp}, \texttt{score}. Le traitement est déclenché par micro-batches (ex. toutes les 20 secondes) avec un checkpoint pour la reprise après arrêt.
+  \item \textbf{Spark (pipeline de traitement)} \\
+  Pour chaque batch : nettoyage du texte (minuscules, suppression URLs et caractères non alphanumériques, trim), tokenisation et suppression des stop-words, extraction des features temporelles (year, month, day, hour, day\_of\_week, day\_of\_year), analyse de sentiment (UDF Pandas sur listes de mots positifs/négatifs), puis passage dans les modèles ML chargés (Word2Vec, CountVectorizer, LDA, StringIndexer subreddit/sentiment, Random Forest). Les sujets LDA sont mappés en libellés lisibles via le vocabulaire du CountVectorizer (ex. \texttt{wallet-key-lost}). Le score prédit est arrondi et une colonne \texttt{viralite} est ajoutée (HOT / UP / LOW selon des seuils).
+  \item \textbf{Spark $\rightarrow$ Cassandra / MongoDB} \\
+  Le DataFrame enrichi est écrit vers Cassandra (format \texttt{org.apache.spark.sql.cassandra}, keyspace \texttt{reddit\_db}, table \texttt{viral\_posts}). En cas d'exception (timeout, cluster indisponible), le même lot est envoyé vers MongoDB (base \texttt{reddit\_backup\_local}, collection \texttt{viral\_posts}) via \texttt{pymongo} depuis le driver Spark, garantissant qu'aucun batch ne soit perdu tant qu'au moins un des deux stockages est accessible.
+  \item \textbf{Cassandra / MongoDB $\rightarrow$ Dashboard} \\
+  Les applications Streamlit et Power BI se connectent à Cassandra (ou MongoDB) pour requêter les données et afficher tendances de sentiment, sujets dominants et posts viraux.
+\end{enumerate}
+
+\subsection{Choix d'architecture}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Cassandra} : base orientée colonnes, adaptée aux écritures massives et aux séries temporelles~; schéma optimisé pour des requêtes par clé (partition key). Choix cohérent pour un flux continu de posts.
+  \item \textbf{MongoDB en fallback} : schéma souple (document), ce qui permet d'absorber d'éventuels changements de structure des données sans rejet. En cas de pression sur Cassandra ou évolution du schéma, les lots sont tout de même persistés, assurant la continuité du pipeline.
+  \item \textbf{Kafka} : découplage entre producteurs (ingestion Mastodon) et consommateurs (Spark), avec possibilité de rejeu (replay) et de scaling des consumers. Les messages sont conservés selon la rétention configurée.
+\end{itemize}
+
+%==============================================================================
+\section{Formats de données et schémas}
+%==============================================================================
+
+\subsection{Message Kafka (JSON)}
+
+Chaque message publié dans \texttt{Mastodon\_Data} est un objet JSON (UTF-8) avec les champs suivants, alignés sur le schéma Spark utilisé côté consumer~:
+
+\begin{lstlisting}[language=json,caption=Exemple de message Kafka]
+{
+  "id": "12345678",
+  "author": "crypto_user",
+  "subreddit": "mastodon.social",
+  "text": "Bitcoin is going to the moon...",
+  "timestamp": 1708012345.0,
+  "score": 42
+}
+\end{lstlisting}
+
+Le champ \texttt{subreddit} est en pratique renseigné avec l'instance Mastodon (ex. \texttt{mastodon.social}) pour garder une structure compatible avec le reste du pipeline. Le \texttt{timestamp} est un Unix timestamp (secondes) et \texttt{score} correspond à la somme des favoris et des partages (reblogs) du statut.
+
+\subsection{Schéma Cassandra (init.cql)}
+
+Le script \texttt{init.cql} est exécuté par le service \texttt{cassandra-init} après démarrage de Cassandra. Il crée un keyspace et une table pour les posts (structure simplifiée sans toutes les colonnes ML)~:
+
+\begin{lstlisting}[language=SQL,caption=Schéma Cassandra (extrait init.cql)]
+CREATE KEYSPACE IF NOT EXISTS reddit_keyspace
+WITH replication = {'class': 'SimpleStrategy', 
+                    'replication_factor': 1};
+
+CREATE TABLE IF NOT EXISTS reddit_keyspace.reddit_posts (
+    id TEXT PRIMARY KEY,
+    author TEXT,
+    subreddit TEXT,
+    text_content TEXT,
+    score INT,
+    creation_date TIMESTAMP,
+    ingestion_date TIMESTAMP
+);
+\end{lstlisting}
+
+Le moteur Spark peut écrire dans une table plus riche (ex. \texttt{reddit\_db.viral\_posts} avec colonnes sentiment, sujet, score\_predit, viralite) si ce schéma est créé côté Cassandra. Les dashboards peuvent s'appuyer sur \texttt{reddit\_keyspace.reddit\_posts} ou sur cette table enrichie selon le déploiement.
+
+\subsection{MongoDB (fallback)}
+
+En fallback, les documents insérés ont la même structure logique que le DataFrame Spark~: \texttt{id}, \texttt{author}, \texttt{subreddit}, \texttt{text\_content}, \texttt{sentiment}, \texttt{sujet}, \texttt{score\_predit}, \texttt{viralite}, \texttt{creation\_date}. La base utilisée est \texttt{reddit\_backup\_local} et la collection \texttt{viral\_posts}.
+
+%==============================================================================
+\section{Stack technique détaillée}
+%==============================================================================
+
+\subsection{Ingestion (Mastodon $\rightarrow$ Kafka)}
+
+\subsubsection{Configuration}
+
+La configuration d'ingestion se trouve dans \texttt{main/data\_ingestion/config.py}~: URL de l'instance Mastodon (\texttt{mastodon.social}), topic Kafka (\texttt{Mastodon\_Data}), URL du broker (\texttt{broker:9092} ou variable d'environnement \texttt{KAFKA\_BROKER\_URL}), nombre de partitions et facteur de réplication du topic. La liste des mots-clés de filtrage est~:
+
+\begin{lstlisting}[language=Python,caption=Mots-clés de filtrage (config.py)]
+KEYWORDS = [
+    "bitcoin", "btc", "ethereum", "eth", "crypto",
+    "cryptocurrency", "blockchain", "defi", "nft", "web3",
+    "solana", "cardano", "dogecoin", "doge", "altcoin",
+    "trading", "hodl", "moon"
+]
+\end{lstlisting}
+
+\subsubsection{Comportement du script}
+
+La classe \texttt{MastodonDataIngestion} initialise un client Mastodon (sans authentification), crée le topic Kafka si nécessaire via \texttt{KafkaAdminClient}, puis instancie un \texttt{KafkaProducer} avec sérialisation JSON. La méthode \texttt{stream\_public\_timeline} enregistre un \texttt{MastodonKafkaListener} qui, à chaque \texttt{on\_update}, filtre le contenu par mots-clés, nettoie le HTML du texte, construit l'objet \texttt{id, author, instance, text, timestamp, score} et envoie le message à Kafka. En cas d'erreur réseau, le script peut réessayer après une pause (ex. 5 secondes).
+
+\subsection{Traitement Spark}
+
+\subsubsection{Configuration Spark}
+
+Fichier \texttt{spark/config.py}~: \texttt{KAFKA\_TOPIC}, \texttt{KAFKA\_BROKER\_URL} (\texttt{broker:9092}), \texttt{APP\_NAME}, \texttt{MASTER} (\texttt{spark://spark-master:7077}), chemins des modèles (\texttt{/opt/spark/models/word2vec}, \texttt{count\_vectorizer\_model}, \texttt{lda\_model}, \texttt{subreddit\_indexer\_model}, \texttt{sentiment\_indexer\_model}, \texttt{random\_forest\_model}), hôte/port Cassandra et MongoDB, liste des stop-words pour le prétraitement.
+
+\subsubsection{Prétraitement (DataPreprocessor)}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{clean\_text} : suppression des lignes sans \texttt{text}, passage en minuscules, regex pour supprimer URLs (\texttt{https?://\S+}, \texttt{www\.\S+}) et caractères non alphanumériques/espaces, puis normalisation des espaces multiples et trim.
+  \item \textbf{extract\_time\_features} : conversion de \texttt{timestamp} en \texttt{timestamp} Spark, puis extraction de \texttt{year}, \texttt{month}, \texttt{day}, \texttt{hour}, \texttt{day\_of\_week}, \texttt{day\_of\_year}.
+  \item \textbf{tokenize\_and\_remove\_stopwords} : Tokenizer (\texttt{text} $\rightarrow$ \texttt{words}), StopWordsRemover avec la liste \texttt{config.STOPWORDS} (\texttt{words} $\rightarrow$ \texttt{filtered\_words}).
+  \item \textbf{get\_sentiment\_udf} : UDF Pandas (pour performance) qui compte les occurrences de mots positifs (bullish, moon, hodl, buy, good, amazing, future, great, excellent) et négatifs (dip, sell, crash, bad, volatile, risky, terrible, worst) et renvoie \texttt{Positive}, \texttt{Negative} ou \texttt{Neutral}.
+\end{itemize}
+
+\subsubsection{Chargement des modèles (ModelLoader)}
+
+La classe \texttt{ModelLoader} charge depuis le disque~: \texttt{Word2VecModel}, \texttt{CountVectorizerModel}, \texttt{LocalLDAModel}, deux \texttt{StringIndexerModel} (subreddit et sentiment, avec \texttt{setHandleInvalid("keep")}), et \texttt{RandomForestRegressionModel}. En cas d'échec (fichier manquant, etc.), le processus Spark s'arrête (\texttt{sys.exit(1)}).
+
+\subsubsection{Moteur d'inférence (RedditInferenceEngine)}
+
+\begin{itemize}[leftmargin=*]
+  \item Création de la \texttt{SparkSession} avec les packages Kafka et les options Cassandra.
+  \item Génération des libellés de sujets LDA à partir du vocabulaire du CountVectorizer et de \texttt{describeTopics(maxTermsPerTopic=3)} pour mapper chaque topic à une chaîne du type \texttt{word1-word2-word3}.
+  \item Pour chaque batch Kafka : \texttt{\_transform\_batch} (clean, tokenize, time features, sentiment, w2v, cv, lda, indexers, VectorAssembler) puis prédiction Random Forest, ajout de \texttt{sujet\_mots}, \texttt{score\_predit} et \texttt{viralite} (HOT si prédiction $>3$, UP si $>1.5$, sinon LOW).
+  \item Écriture : \texttt{process\_and\_save} prépare un \texttt{storage\_df} avec les colonnes attendues par Cassandra/MongoDB, tente d'abord \texttt{write.format("cassandra").options(...).mode("append").save()}, et en \texttt{except} appelle \texttt{save\_to\_mongo} qui convertit le DataFrame en list de dict et fait \texttt{insert\_many} dans la collection MongoDB.
+\end{itemize}
+
+\subsubsection{Paramètres du stream}
+
+Lecture Kafka avec \texttt{trigger(processingTime="20 seconds")} et \texttt{option("checkpointLocation", "/opt/spark/work-dir/checkpoints")}. La requête streaming s'exécute jusqu'à \texttt{awaitTermination()}.
+
+\subsection{Orchestration Airflow}
+
+Le DAG \texttt{mastodon\_pipeline} est défini dans \texttt{airflow/dags/orchestration\_pipeline.py}~: \texttt{schedule\_interval=None} (lancement manuel), \texttt{max\_active\_runs=1}, \texttt{catchup=False}. Deux tâches Bash~:
+\begin{enumerate}[leftmargin=*]
+  \item \texttt{run\_mastodon} : \texttt{/usr/local/bin/python /opt/airflow/main/data\_ingestion/mastodon\_ingestion.py} (lance le stream Mastodon $\rightarrow$ Kafka ; en pratique cette tâche peut tourner en continu ou être arrêtée selon le besoin de la démo).
+  \item \texttt{run\_spark} : \texttt{docker exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 --py-files /opt/spark/work-dir/config.py ... /opt/spark/work-dir/run.py}.
+\end{enumerate}
+
+Les dépendances entre tâches ne sont pas définies dans le snippet fourni~; on peut ajouter \texttt{run\_spark.set\_upstream(run\_mastodon)} si on souhaite que Spark ne démarre qu'après le début de l'ingestion. Les arguments par défaut du DAG incluent \texttt{retries=1}, \texttt{retry\_delay=5 minutes}.
+
+%==============================================================================
+\section{Structure détaillée du projet}
+%==============================================================================
+
+\begin{description}[leftmargin=!,labelwidth=\widthof{\texttt{airflow/plugins/}}]
+  \item[\texttt{main/}] Code métier partagé (monté dans Airflow et éventuellement Kafka).
+  \item[\texttt{main/data\_ingestion/}] \texttt{mastodon\_ingestion.py} (stream Mastodon + envoi Kafka), \texttt{config.py} (Kafka, Mastodon, KEYWORDS).
+  \item[\texttt{spark/}] \texttt{run.py} (point d'entrée, crée \texttt{RedditInferenceEngine} et appelle \texttt{run()}), \texttt{engine.py} (RedditInferenceEngine : Kafka $\rightarrow$ transform $\rightarrow$ Cassandra/MongoDB), \texttt{preprocessor.py} (DataPreprocessor), \texttt{loader.py} (ModelLoader), \texttt{config.py} (Kafka, Spark, chemins modèles, Cassandra, MongoDB, STOPWORDS).
+  \item[\texttt{airflow/dags/}] \texttt{orchestration\_pipeline.py} (DAG \texttt{mastodon\_pipeline}).
+  \item[\texttt{airflow/logs/}, \texttt{airflow/plugins/}] Logs et plugins Airflow (volumes montés).
+  \item[\texttt{init.cql}] Schéma Cassandra (keyspace \texttt{reddit\_keyspace}, table \texttt{reddit\_posts}).
+  \item[\texttt{docker-compose.yml}] Définition de tous les services, réseaux et volumes (kafka\_data, cassandra\_data, mongodb\_data, airflow-db).
+  \item[\texttt{start.sh}] Script de démarrage : vérification Docker, \texttt{docker-compose down -v}, \texttt{docker-compose up -d --build}, attente Cassandra et exécution de \texttt{init.cql}, affichage des accès et commandes utiles.
+\end{description}
+
+%==============================================================================
+\section{Lancement du projet et vérifications}
+%==============================================================================
+
+\subsection{Prérequis}
+
+\begin{itemize}[leftmargin=*]
+  \item Docker et Docker Compose installés et en cours d'exécution (Docker Desktop ou démon Docker).
+  \item Au moins 4 Go de RAM disponibles pour les conteneurs.
+  \item Les répertoires \texttt{main/}, \texttt{spark/}, \texttt{airflow/dags/} et \texttt{init.cql} doivent être présents à la racine du projet.
+\end{itemize}
+
+\subsection{Démarrage}
+
+À la racine du projet~:
+
+\begin{lstlisting}[language=bash,caption=Démarrage rapide]
+chmod +x start.sh
+./start.sh
+\end{lstlisting}
+
+Le script~: (1) vérifie que Docker répond, (2) exécute \texttt{docker-compose down -v} puis \texttt{docker-compose up -d --build}, (3) attend environ 30 secondes puis affiche le statut des services, (4) attend que le conteneur \texttt{cassandra-init} ait terminé (message «~Tables créées avec succès~» dans les logs, timeout 60 s). Alternative sans script~: \texttt{docker-compose up -d --build}.
+
+\subsection{Accès aux interfaces}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Airflow} : \url{http://localhost:8091} (identifiants \texttt{admin} / \texttt{admin}). Activer le DAG \texttt{mastodon\_pipeline} et le lancer manuellement (bouton \emph{Trigger DAG}).
+  \item \textbf{Spark Master UI} : \url{http://localhost:8083} (onglets Workers, Applications, requêtes streaming).
+  \item \textbf{Kafka} : \texttt{localhost:9093} pour les clients hors Docker (ex. scripts de test).
+  \item \textbf{Cassandra} : \texttt{localhost:9042} (cqlsh ou drivers).
+  \item \textbf{MongoDB} : \texttt{localhost:27018} (mongosh ou drivers).
+\end{itemize}
+
+\subsection{Commandes de vérification}
+
+\begin{lstlisting}[language=bash,caption=Vérifications utiles]
+# Lister les topics Kafka
+docker exec broker kafka-topics --bootstrap-server localhost:9092 --list
+
+# Consommer quelques messages du topic Mastodon_Data
+docker exec -it broker kafka-console-consumer --bootstrap-server localhost:9092 --topic Mastodon_Data --from-beginning --max-messages 5
+
+# Vérifier le keyspace et les tables Cassandra
+docker exec -it cassandra cqlsh -e "DESCRIBE KEYSPACES;"
+docker exec -it cassandra cqlsh -e "DESCRIBE TABLES;" -k reddit_keyspace
+
+# Requête sur les posts stockés
+docker exec -it cassandra cqlsh -e "SELECT * FROM reddit_keyspace.reddit_posts LIMIT 10;"
+
+# MongoDB (fallback)
+docker exec -it mongodb mongosh --eval "db.getSiblingDB('reddit_backup_local').viral_posts.find().limit(5)"
+
+# Logs des services
+docker logs airflow-webserver -f
+docker logs spark-worker -f
+docker logs cassandra-init
+\end{lstlisting}
+
+\subsection{Dépannage rapide}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Docker non démarré} : le script \texttt{start.sh} affiche «~Docker is not running!~». Démarrer Docker Desktop ou le démon Docker puis relancer \texttt{./start.sh}.
+  \item \textbf{Kafka injoignable depuis l'ingestion} : vérifier que le conteneur \texttt{broker} est bien en cours d'exécution et que \texttt{KAFKA\_BROKER\_URL} pointe vers \texttt{broker:9092} depuis les conteneurs Airflow.
+  \item \textbf{Cassandra pas prêt} : le service \texttt{cassandra-init} attend que Cassandra réponde à \texttt{cqlsh} avant d'exécuter \texttt{init.cql}. Consulter \texttt{docker logs cassandra-init} et éventuellement augmenter les délais dans le script d'init ou dans \texttt{start.sh}.
+  \item \textbf{Spark ne consomme pas Kafka} : vérifier que le topic \texttt{Mastodon\_Data} existe et que des messages sont produits (tâche \texttt{run\_mastodon} active). Vérifier les logs du worker Spark et le checkpoint (pas de conflit de réutilisation de checkpoint avec un ancien query).
+  \item \textbf{Échec d'écriture Cassandra} : si le keyspace ou la table utilisés par Spark (\texttt{reddit\_db.viral\_posts}) n'existent pas, créer le schéma côté Cassandra ou adapter \texttt{init.cql} et redémarrer \texttt{cassandra-init}. En attendant, le fallback MongoDB doit recevoir les lots.
+\end{itemize}
+
+%==============================================================================
+\section{Conclusion}
+%==============================================================================
+
+Ce pipeline démontre une architecture Big Data complète~: ingestion temps réel (Mastodon), bus d'événements (Kafka), traitement stream (Spark Structured Streaming), enrichissement NLP/ML (sentiment, LDA, viralité), stockage résilient (Cassandra + MongoDB) et orchestration (Airflow). Le mécanisme de fallback garantit la continuité de la persistance des données~; le passage à Mastodon simplifie les démonstrations sans dépendance à des clés API Reddit. Les évolutions possibles incluent~: l'intégration d'un modèle de sentiment plus avancé (ex. API Transformer type DistilRoBERTa)~; l'élargissement des sources (Reddit avec PRAW)~; l'alignement des schémas Cassandra (reddit\_keyspace vs reddit\_db)~; l'ajout de dépendances explicites entre tâches Airflow~; et le renforcement du monitoring (métriques, alertes, dashboards opérationnels).
+
+\end{document}

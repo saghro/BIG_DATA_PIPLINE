@@ -4,14 +4,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 import praw
 import time
 import json
-import re
 from typing import List  
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka import KafkaProducer
-from kafka.errors import  NoBrokersAvailable
-from config import CLIENT_ID,CLIENT_SECRET, KEYWORDS, SUBREDDITS,USER_AGENT,USERNAME,KAFKA_TOPIC,KAFKA_BROKER_URL,PARTITIONS,REPLICATION_FACTOR,AZURE_CONTAINER_NAME,AZURE_CONNECTION_STRING
+from kafka.errors import NoBrokersAvailable
+from config import CLIENT_ID, CLIENT_SECRET, KEYWORDS, SUBREDDITS, USER_AGENT, KAFKA_TOPIC, KAFKA_BROKER_URL, PARTITIONS, REPLICATION_FACTOR
 from utils import contains_keywords
-from azure.storage.filedatalake import DataLakeServiceClient
 
 class DataIngestion:
     """
@@ -37,12 +35,6 @@ class DataIngestion:
         self.producer = self.create_kafka_producer()
 
         print("✅ Initialisation complète : Reddit → Kafka prête.")
-        # 🔹 NOUVEAU : Initialisation Azure
-        self.connection_string = AZURE_CONNECTION_STRING # Stockage nécessaire
-        self.azure_service_client = DataLakeServiceClient.from_connection_string(self.connection_string)
-        self.container_name = AZURE_CONTAINER_NAME
-        self.buffer = []  
-        self.buffer_limit = 10
 
 
     # ==============================================================
@@ -133,54 +125,12 @@ class DataIngestion:
                         "score": comment.score
                     }
                     self.send_to_kafka(data)
-                    # 2. MISE EN ATTENTE POUR AZURE
-                    self.buffer.append(data)
-
-                    # 3. SI LE SAC EST PLEIN, ON ENVOIE SUR AZURE
-                    if len(self.buffer) >= self.buffer_limit:
-                        self.save_to_datalake()
 
         except KeyboardInterrupt:
-            if self.buffer: # Sauvegarde ce qui reste avant de couper
-                self.save_to_datalake()
             print("🛑 Arrêt du script.")
         except Exception as e:
             print(f"⚠️ Erreur stream Reddit : {e}")
             time.sleep(5)
-            
-    def save_to_datalake(self):
-        """Append the buffer to a single file in Azure Data Lake Gen2"""
-        if not self.buffer:
-            return
-
-        try:
-            # Use the client from __init__
-            file_system_client = self.azure_service_client.get_file_system_client(file_system=self.container_name)
-            
-            # Single target file
-            filename = "raw_reddit.json"
-            file_client = file_system_client.get_file_client(f"bronze/{filename}")
-            
-            # Convert buffer to JSON lines (one dict per line)
-            # This way we can append without breaking JSON
-            data_to_upload = "\n".join(json.dumps(item) for item in self.buffer) + "\n"
-            data_bytes = data_to_upload.encode('utf-8')
-            
-            # If file does not exist, create it
-            if not file_client.exists():
-                file_client.create_file()
-            
-            # Append at the end
-            file_client.append_data(data_bytes, offset=file_client.get_file_properties().size, length=len(data_bytes)) # Offset tells Azure where to start writing → at the end of the file
-            # flush_data(length) → Commit the data you just appended
-            file_client.flush_data(file_client.get_file_properties().size + len(data_bytes))
-            
-            print(f"📦 Appended {len(self.buffer)} messages to {filename} on Azure.")
-            
-            # Clear the buffer
-            self.buffer = []
-        except Exception as e:
-            print(f"❌ Error saving to Azure: {e}")
 
 
 

@@ -1,0 +1,284 @@
+% Présentation LaTeX Beamer - Pipeline Big Data Mastodon/Reddit (version détaillée)
+\documentclass[11pt,aspectratio=169]{beamer}
+\usetheme{Madrid}
+\usecolortheme{default}
+\usepackage[utf8]{inputenc}
+\usepackage[french]{babel}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\lstset{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=none,
+  numbers=none
+}
+
+\title[Pipeline Big Data]{Pipeline Big Data temps réel\\Sentiment \& Viralité — Mastodon/Reddit}
+\subtitle{Rapport détaillé : architecture, données, code, déploiement}
+\author{
+  saghro (maintainer)\\
+  \small\textit{Projet dérivé ; crédits équipe initiale : EL RHERBI, CHATRAOUI, DHAH, EL Houdaigui, AMMAM}
+}
+\institute{Projet Big Data}
+\date{\today}
+
+\begin{document}
+
+%-------------------------------------------------------------------------------
+\frame{\titlepage}
+%-------------------------------------------------------------------------------
+
+\begin{frame}{Sommaire}
+  \tableofcontents
+\end{frame}
+
+%-------------------------------------------------------------------------------
+\section{Introduction et objectifs}
+%-------------------------------------------------------------------------------
+
+\begin{frame}{Contexte du projet}
+  \begin{itemize}[leftmargin=*]
+    \item Pipeline Big Data \textbf{de bout en bout} pour l'analyse en temps réel de discussions (finance, crypto).
+    \item Conçu initialement pour \textbf{Reddit} (r/Bitcoin, r/CryptoCurrency), étendu à \textbf{Mastodon} pour s'affranchir des clés API.
+    \item Instance utilisée : \texttt{mastodon.social} (timeline publique, pas d'authentification).
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Objectifs principaux}
+  \begin{enumerate}[leftmargin=*]
+    \item \textbf{Ingestion} : Mastodon (timeline publique) $\rightarrow$ filtrage par mots-clés $\rightarrow$ Kafka.
+    \item \textbf{Traitement} : Spark Streaming, NLP (sentiment, LDA), ML (prédiction de viralité Random Forest).
+    \item \textbf{Stockage} : Cassandra (primaire) + MongoDB (fallback) pour \textbf{zéro perte de données}.
+    \item \textbf{Orchestration} : Airflow (DAG \texttt{mastodon\_pipeline}).
+    \item \textbf{Visualisation} : Streamlit, Power BI.
+  \end{enumerate}
+\end{frame}
+
+%-------------------------------------------------------------------------------
+\section{Architecture technique}
+%-------------------------------------------------------------------------------
+
+\begin{frame}{Vue d'ensemble des services Docker}
+  \begin{center}
+    \small
+    \begin{tabular}{@{}lll@{}}
+      \toprule
+      \textbf{Service} & \textbf{Rôle} & \textbf{Port} \\
+      \midrule
+      broker (Kafka) & Bus d'événements, topic \texttt{Mastodon\_Data} & 9092 / 9093 \\
+      spark-master & Coordinateur Spark & 8083 (UI), 7077 \\
+      spark-worker & Exécution des jobs & 8084 \\
+      cassandra & Stockage NoSQL primaire & 9042 \\
+      mongodb & Stockage fallback & 27018 \\
+      airflow-webserver & Interface Airflow & 8091 \\
+      airflow-scheduler & Planification DAGs & --- \\
+      \bottomrule
+    \end{tabular}
+  \end{center}
+  \vspace{0.5em}
+  Réseau : \texttt{reddit-network} (bridge). Volumes persistants : kafka\_data, cassandra\_data, mongodb\_data, airflow-db.
+\end{frame}
+
+\begin{frame}{Flux de données (1/2)}
+  \begin{enumerate}[leftmargin=*]
+    \item \textbf{Mastodon $\rightarrow$ Kafka} \\
+    Script Python : \texttt{stream\_public} + filtre mots-clés (bitcoin, crypto, eth, etc.) $\rightarrow$ JSON (id, author, text, timestamp, score) $\rightarrow$ topic \texttt{Mastodon\_Data}.
+    \item \textbf{Kafka $\rightarrow$ Spark} \\
+    Structured Streaming : \texttt{startingOffsets: earliest}, \texttt{maxOffsetsPerTrigger: 50}, micro-batches (ex. 20 s), checkpoint pour reprise.
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Flux de données (2/2)}
+  \begin{enumerate}[leftmargin=*]\setcounter{enumi}{2}
+    \item \textbf{Spark} : nettoyage texte, tokenisation, stop-words, features temporelles, sentiment (UDF), Word2Vec, CountVectorizer, LDA, indexers, Random Forest $\rightarrow$ score viralité + libellés sujets (ex. \texttt{wallet-key-lost}).
+    \item \textbf{Spark $\rightarrow$ stockage} : écriture Cassandra (\texttt{reddit\_db.viral\_posts}) ; en cas d'échec $\rightarrow$ MongoDB (\texttt{reddit\_backup\_local.viral\_posts}).
+    \item \textbf{Dashboards} : Streamlit / Power BI lisent Cassandra ou MongoDB.
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Choix d'architecture}
+  \begin{itemize}[leftmargin=*]
+    \item \textbf{Cassandra} : écritures massives, séries temporelles, requêtes par clé.
+    \item \textbf{MongoDB en fallback} : schéma document souple, pas de rejet si structure évolue $\Rightarrow$ zéro perte de données.
+    \item \textbf{Kafka} : découplage producteur/consommateur, rejeu, scaling des consumers.
+  \end{itemize}
+\end{frame}
+
+%-------------------------------------------------------------------------------
+\section{Formats de données et schémas}
+%-------------------------------------------------------------------------------
+
+\begin{frame}{Message Kafka (JSON)}
+  Chaque message sur \texttt{Mastodon\_Data} :
+  \begin{lstlisting}[language=json]
+{"id": "12345678", "author": "user",
+ "subreddit": "mastodon.social", "text": "...",
+ "timestamp": 1708012345.0, "score": 42}
+  \end{lstlisting}
+  \texttt{score} = favourites + reblogs ; \texttt{timestamp} = Unix (secondes). Schéma Spark aligné : \texttt{id}, \texttt{author}, \texttt{subreddit}, \texttt{text}, \texttt{timestamp}, \texttt{score}.
+\end{frame}
+
+\begin{frame}{Schéma Cassandra (init.cql)}
+  \begin{lstlisting}[language=SQL]
+CREATE KEYSPACE reddit_keyspace
+WITH replication = {'class': 'SimpleStrategy',
+                     'replication_factor': 1};
+
+CREATE TABLE reddit_keyspace.reddit_posts (
+    id TEXT PRIMARY KEY, author TEXT, subreddit TEXT,
+    text_content TEXT, score INT,
+    creation_date TIMESTAMP, ingestion_date TIMESTAMP
+);
+  \end{lstlisting}
+  Le moteur Spark peut aussi écrire dans \texttt{reddit\_db.viral\_posts} (colonnes enrichies : sentiment, sujet, score\_predit, viralite) si ce schéma est créé.
+\end{frame}
+
+%-------------------------------------------------------------------------------
+\section{Stack technique détaillée}
+%-------------------------------------------------------------------------------
+
+\begin{frame}{Ingestion : configuration et mots-clés}
+  \textbf{Fichier} : \texttt{main/data\_ingestion/config.py}\\
+  Instance : \texttt{mastodon.social} ; topic : \texttt{Mastodon\_Data} ; broker : \texttt{broker:9092}.\\
+  \vspace{0.3em}
+  \textbf{Mots-clés de filtrage} : bitcoin, btc, ethereum, eth, crypto, cryptocurrency, blockchain, defi, nft, web3, solana, cardano, dogecoin, doge, altcoin, trading, hodl, moon.
+\end{frame}
+
+\begin{frame}{Prétraitement Spark (DataPreprocessor)}
+  \begin{itemize}[leftmargin=*]
+    \item \textbf{clean\_text} : minuscules, suppression URLs et caractères non alphanumériques, trim.
+    \item \textbf{extract\_time\_features} : year, month, day, hour, day\_of\_week, day\_of\_year.
+    \item \textbf{tokenize\_and\_remove\_stopwords} : Tokenizer + StopWordsRemover (liste \texttt{config.STOPWORDS}).
+    \item \textbf{get\_sentiment\_udf} : UDF Pandas ; mots positifs (bullish, moon, hodl, buy, good, ...) vs négatifs (dip, sell, crash, bad, ...) $\rightarrow$ Positive / Negative / Neutral.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Modèles ML chargés (ModelLoader)}
+  Depuis \texttt{/opt/spark/models/} :
+  \begin{itemize}[leftmargin=*]
+    \item Word2VecModel, CountVectorizerModel, LocalLDAModel
+    \item StringIndexerModel (subreddit, sentiment) avec \texttt{handleInvalid="keep"}
+    \item RandomForestRegressionModel (prédiction score viralité)
+  \end{itemize}
+  En cas d'échec de chargement : arrêt du job (\texttt{sys.exit(1)}).
+\end{frame}
+
+\begin{frame}{Moteur d'inférence (RedditInferenceEngine)}
+  \begin{enumerate}[leftmargin=*]
+    \item SparkSession + packages Kafka, config Cassandra.
+    \item Génération libellés LDA (vocabulaire + \texttt{describeTopics(3)} $\rightarrow$ \texttt{word1-word2-word3}).
+    \item Par batch : \texttt{\_transform\_batch} $\rightarrow$ prédiction RF $\rightarrow$ colonnes \texttt{sujet\_mots}, \texttt{score\_predit}, \texttt{viralite} (HOT $>3$, UP $>1.5$, LOW sinon).
+    \item Écriture : \texttt{try} Cassandra \texttt{.write.format("cassandra").mode("append")} $\rightarrow$ \texttt{except} \texttt{save\_to\_mongo} (toPandas $\rightarrow$ insert\_many).
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Résilience : Cassandra + MongoDB}
+  \begin{itemize}[leftmargin=*]
+    \item \textbf{Cassandra} : stockage principal (haute écriture, séries temporelles).
+    \item \textbf{MongoDB} : schéma document ; utilisé automatiquement si Cassandra échoue (timeout, cluster down).
+    \item Dans le code : \texttt{try} écriture Cassandra $\rightarrow$ \texttt{except} écriture MongoDB (\texttt{pymongo}, même lot).
+    \item Garantie : \textbf{aucune perte de données} tant qu'au moins un des deux stockages est accessible.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Orchestration Airflow}
+  \textbf{DAG} : \texttt{mastodon\_pipeline} (\texttt{schedule\_interval=None}, \texttt{max\_active\_runs=1}).\\
+  \vspace{0.3em}
+  \textbf{Tâches} :
+  \begin{enumerate}[leftmargin=*]
+    \item \texttt{run\_mastodon} : \texttt{python .../mastodon\_ingestion.py} (stream Mastodon $\rightarrow$ Kafka).
+    \item \texttt{run\_spark} : \texttt{docker exec spark-master spark-submit ... run.py}.
+  \end{enumerate}
+  Dépendances : à définir si besoin (ex. \texttt{run\_spark.set\_upstream(run\_mastodon)}). \texttt{retries=1}, \texttt{retry\_delay=5 min}.
+\end{frame}
+
+%-------------------------------------------------------------------------------
+\section{Structure du projet}
+%-------------------------------------------------------------------------------
+
+\begin{frame}{Arborescence principale}
+  \small
+  \begin{itemize}[leftmargin=*]
+    \item \texttt{main/data\_ingestion/} : \texttt{mastodon\_ingestion.py}, \texttt{config.py}
+    \item \texttt{spark/} : \texttt{run.py}, \texttt{engine.py}, \texttt{preprocessor.py}, \texttt{loader.py}, \texttt{config.py}
+    \item \texttt{airflow/dags/} : \texttt{orchestration\_pipeline.py}
+    \item \texttt{init.cql} : schéma Cassandra
+    \item \texttt{docker-compose.yml} : services, réseaux, volumes
+    \item \texttt{start.sh} : démarrage et attente Cassandra
+  \end{itemize}
+\end{frame}
+
+%-------------------------------------------------------------------------------
+\section{Lancement et vérifications}
+%-------------------------------------------------------------------------------
+
+\begin{frame}{Lancer le projet}
+  \textbf{Prérequis} : Docker et Docker Compose en cours d'exécution, 4 Go+ RAM.\\
+  \vspace{0.3em}
+  À la racine :
+  \begin{lstlisting}[language=bash]
+./start.sh
+  \end{lstlisting}
+  ou \texttt{docker-compose up -d --build}.\\
+  \vspace{0.3em}
+  Le script vérifie Docker, lance les services, attend l'init Cassandra (\texttt{cassandra-init}) et affiche les URLs d'accès.
+\end{frame}
+
+\begin{frame}{Accès et premières vérifications}
+  \begin{itemize}[leftmargin=*]
+    \item \textbf{Airflow} : \url{http://localhost:8091} (admin / admin) $\rightarrow$ activer et lancer \texttt{mastodon\_pipeline}.
+    \item \textbf{Spark UI} : \url{http://localhost:8083} (workers, applications, streaming).
+    \item \textbf{Kafka} : \texttt{docker exec -it broker kafka-console-consumer --bootstrap-server localhost:9092 --topic Mastodon\_Data --from-beginning --max-messages 5}
+    \item \textbf{Cassandra} : \texttt{docker exec -it cassandra cqlsh -e "SELECT * FROM reddit\_keyspace.reddit\_posts LIMIT 10;"}
+    \item \textbf{MongoDB} : \texttt{docker exec -it mongodb mongosh --eval "db.getSiblingDB('reddit\_backup\_local').viral\_posts.find().limit(5)"}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Dépannage rapide}
+  \small
+  \begin{itemize}[leftmargin=*]
+    \item \textbf{Docker non démarré} : démarrer Docker Desktop puis \texttt{./start.sh}.
+    \item \textbf{Kafka injoignable} : vérifier \texttt{broker} en marche et \texttt{KAFKA\_BROKER\_URL=broker:9092}.
+    \item \textbf{Cassandra pas prêt} : \texttt{docker logs cassandra-init} ; augmenter délais si besoin.
+    \item \textbf{Spark ne consomme pas} : vérifier que \texttt{Mastodon\_Data} existe et que \texttt{run\_mastodon} produit des messages ; vérifier checkpoint.
+    \item \textbf{Échec écriture Cassandra} : créer \texttt{reddit\_db.viral\_posts} ou adapter \texttt{init.cql} ; le fallback MongoDB doit prendre le relais.
+  \end{itemize}
+\end{frame}
+
+%-------------------------------------------------------------------------------
+\section{Conclusion}
+%-------------------------------------------------------------------------------
+
+\begin{frame}{Récapitulatif}
+  \begin{itemize}[leftmargin=*]
+    \item Pipeline complet : \textbf{Mastodon} $\rightarrow$ \textbf{Kafka} $\rightarrow$ \textbf{Spark} (NLP/ML) $\rightarrow$ \textbf{Cassandra / MongoDB} $\rightarrow$ \textbf{Visualisation}.
+    \item Sentiment (UDF mots-clés), sujets (LDA), viralité (Random Forest), stockage résilient.
+    \item Orchestration reproductible (Airflow + Docker). Démo sans clé API grâce à Mastodon.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Évolutions possibles}
+  \begin{itemize}[leftmargin=*]
+    \item Modèle de sentiment avancé (API Transformer type DistilRoBERTa).
+    \item Élargissement des sources (Reddit avec PRAW).
+    \item Alignement des schémas Cassandra (reddit\_keyspace vs reddit\_db).
+    \item Dépendances explicites entre tâches Airflow.
+    \item Monitoring (métriques, alertes, dashboards opérationnels).
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{}
+  \begin{center}
+    \textbf{Merci pour votre attention.}\\[1em]
+    Questions ?
+  \end{center}
+\end{frame}
+
+\end{document}

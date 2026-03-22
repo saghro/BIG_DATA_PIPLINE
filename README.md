@@ -1,6 +1,11 @@
-# 🚀 Reddit Real-Time Sentiment & Virality Pipeline
+# 🚀 BIG_DATA_PIPLINE — Reddit / Mastodon Sentiment & Virality Pipeline
 
-An end-to-end Big Data engineering project that ingests financial discussions from Reddit, processes them in real-time using Spark Streaming and Machine Learning, and stores the results for visualization.
+**Repository:** [github.com/saghro/BIG_DATA_PIPLINE](https://github.com/saghro/BIG_DATA_PIPLINE)  
+**Maintainer:** [@saghro](https://github.com/saghro)
+
+An end-to-end Big Data engineering project that ingests financial discussions from Reddit or Mastodon, processes them in real-time using Spark Streaming and Machine Learning, and stores the results for visualization.
+
+> **Note:** This repository is a fork / personal continuation of an academic group project. The original authors are credited below in [Acknowledgments](#-acknowledgments-original-authors).
 
 This architecture features a hybrid storage solution (Data Lake, NoSQL) and a robust fallback mechanism ensuring zero data loss during the streaming process.
 
@@ -18,11 +23,10 @@ This architecture features a hybrid storage solution (Data Lake, NoSQL) and a ro
 
 This pipeline is designed to detect viral financial trends on Reddit (e.g., r/Bitcoin, r/CryptoCurrency) in real-time. It performs the following operations:
 
-1.  **Ingestion:** Fetches live data via Reddit API and pushes it to **Kafka**. Simultaneously archives raw data to **Azure Data Lake**.
-2.  **Training (Offline):** Machine Learning models are trained locally using historical data from the Data Lake.
-3.  **Inference (Streaming):**
+1.  **Ingestion:** Fetches live data from **Mastodon** (public timeline) and pushes it to **Kafka**.
+2.  **Inference (Streaming):**
     * **Spark Structured Streaming** consumes Kafka topics.
-    * **NLP/Sentiment Analysis:** Calls a dedicated **FastAPI** microservice (DistilRoBERTa).
+    * **NLP/Sentiment Analysis:** Simple keyword-based sentiment analysis (Positive/Negative/Neutral).
     * **Topic Modeling:** Identifies subjects dynamically using LDA.
     * **Virality Prediction:** Uses Random Forest to predict if a post will become "HOT".
 4.  **Storage:**
@@ -59,7 +63,6 @@ This pipeline is designed to detect viral financial trends on Reddit (e.g., r/Bi
 ### Storage
 * **Apache Cassandra:** Primary NoSQL database for real-time analytics.
 * **MongoDB:** Document store used as a robust fallback mechanism.
-* **Azure Data Lake Gen2:** Raw storage / Archiving.
 
 ---
 
@@ -72,7 +75,6 @@ The infrastructure is defined in `docker-compose.yml`:
 | **broker** | Kafka Message Broker | 9092 / 9093 |
 | **spark-master** | Spark Master Node | 8080 (UI) / 7077 |
 | **spark-worker** | Spark Worker Node | 8081 |
-| **sentiment-api** | Python FastAPI (Inference) | 8000 |
 | **cassandra** | Primary NoSQL Sink | 9042 |
 | **mongodb** | Fallback Database | 27017 |
 | **airflow-webserver** | Airflow UI | 8091 |
@@ -82,11 +84,10 @@ The infrastructure is defined in `docker-compose.yml`:
 
 ## ⚙️ Key Features & Logic
 
-### 1. Sentiment Analysis Microservice (`sentiment-api`)
-To avoid heavy deep learning computations inside the JVM/Spark, we use a separate Python container running FastAPI.
-* **Model:** Financial News Sentiment Analysis (DistilRoBERTa).
-* **Input:** List of text strings.
-* **Output:** Sentiment labels.
+### 1. Sentiment Analysis
+Simple keyword-based sentiment analysis performed directly in Spark.
+* **Method:** Keyword matching (positive/negative words).
+* **Output:** Sentiment labels (Positive/Negative/Neutral).
 
 ### 2. The Inference Engine (`RedditInferenceEngine`)
 Running on Spark, this engine handles the complexity:
@@ -111,26 +112,28 @@ Data processed by Spark is visualized in PowerBI to track sentiment trends and t
 
 You can monitor the health and status of the pipeline using the following interfaces:
 
-* **Spark Master UI:** [http://localhost:8080](http://localhost:8080)
+* **Spark Master UI:** [http://localhost:8083](http://localhost:8083)
     * *Use this to monitor active streaming queries, worker status, and memory usage.*
 * **Airflow UI:** [http://localhost:8091](http://localhost:8091)
     * *Use this to view logs, retry failed tasks, and monitor pipeline execution time.*
-* **FastAPI Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
-    * *Use this to test the sentiment analysis model manually with custom text inputs.*
 
 ---
 
-## 👥 Authors
+## 👤 Maintainer (this fork)
 
-This project was jointly designed and developed by:
+* **[@saghro](https://github.com/saghro)** — owner of this repository, ongoing changes and documentation.
 
-* **[EL RHERBI Mohamed Amine]** - [GitHub Profile](https://github.com/medamineelrherbi)
-* **[CHATRAOUI Hamza]** -   [GitHub Profile](https://github.com/chatraouihamza)
-* **[DHAH Chaimaa]** -   [GitHub Profile](https://github.com/ChaimaaDhah)
-* **[EL Houdaigui Maria]** -  [GitHub Profile](https://github.com/mariaelhoudaigui)
-* **[AMMAM Yassir]** - [GitHub Profile](https://github.com/yassiraamam)
+## 🙏 Acknowledgments (original authors)
 
-*We built this entire pipeline together from scratch.*
+The initial pipeline was jointly designed and developed by:
+
+* [EL RHERBI Mohamed Amine](https://github.com/medamineelrherbi)
+* [CHATRAOUI Hamza](https://github.com/chatraouihamza)
+* [DHAH Chaimaa](https://github.com/ChaimaaDhah)
+* [EL Houdaigui Maria](https://github.com/mariaelhoudaigui)
+* [AMMAM Yassir](https://github.com/yassiraamam)
+
+Original upstream context: group Big Data project (Reddit pipeline). This fork adds Mastodon ingestion, demo scripts, LaTeX docs, and other personal updates.
 
 ## 📝 License
 
