@@ -7,15 +7,38 @@ An end-to-end Big Data engineering project that ingests financial discussions fr
 
 > **Note:** This repository is a fork / personal continuation of an academic group project. The original authors are credited below in [Acknowledgments](#-acknowledgments-original-authors).
 
-This architecture features a hybrid storage solution (Data Lake, NoSQL) and a robust fallback mechanism ensuring zero data loss during the streaming process.
+This architecture features a hybrid storage solution (NoSQL primary + document fallback) and a robust mechanism ensuring **zero data loss** during streaming.
 
 ---
 
-## 🏗 Architecture Diagram
+## 🏗 Mastodon Data Processing Architecture
 
-![System Architecture](https://github.com/user-attachments/assets/cfb779a3-ab07-47a9-9c66-ec211e40fe84)
+The diagram below shows the **end-to-end data flow** from the Mastodon public timeline to dashboards and BI tools. All core services run inside **Docker Compose** unless noted.
 
-*The pipeline orchestrates data flow from Reddit to storage layers, managed by Docker Compose.*
+![Mastodon Data Processing Architecture](architecture.png)
+
+### Layers (summary)
+
+| Layer | Components | Role |
+| :--- | :--- | :--- |
+| **Sources** | Mastodon (`mastodon.social`) | **Public timeline** — posts are streamed in real time (no API key). |
+| **Docker Compose** | **Kafka** (topic `Mastodon_Data`) | Message broker between ingestion and Spark. |
+| | **Spark Structured Streaming** | Consumes Kafka, runs NLP + ML (LDA, Random Forest, sentiment). |
+| | **Hugging Face / DistilRoBERTa** *(optional in diagram)* | Sentiment analysis can be integrated alongside keyword-based UDF in Spark. |
+| | **Apache Airflow** (DAG `mastodon_pipeline`) | Orchestrates ingestion and Spark jobs (`run_mastodon` → `run_spark`). |
+| **Storage** | **Apache Cassandra** (keyspace e.g. `reddit_keyspace`) | **Primary write** — high-throughput time-series style storage. |
+| | **MongoDB** | **Fallback write** — if Cassandra fails, batches go here (**zero data loss**). |
+| **Visualization** | **Streamlit** (`dashboard_bi.py`) | Real-time BI-style monitor (queries Cassandra / fallback). |
+| | **Power BI** | Business intelligence via CSV export from Cassandra or MongoDB. |
+
+### Data flow (high level)
+
+1. **Mastodon** → stream filtered posts → **Kafka** (`Mastodon_Data`).
+2. **Kafka** → **Spark Streaming** (micro-batches) + **Airflow** orchestration.
+3. **Spark** → **Cassandra** (primary) or **MongoDB** (automatic fallback).
+4. **Cassandra** / **MongoDB** → **Streamlit** (queries) and **Power BI** (export CSV).
+
+*Source file for edits / Mermaid variant:* see also [`architecture_mastodon.mmd`](architecture_mastodon.mmd).
 
 ---
 
@@ -42,8 +65,8 @@ This pipeline is designed to detect viral financial trends on Reddit (e.g., r/Bi
 >
 > **Why MongoDB for Fallback?** Unlike column-oriented databases like ClickHouse or Cassandra, which enforce a strict **Schema-on-write** policy, MongoDB is **schemaless**. In a real-time streaming context, if the Reddit API evolves or modifies its data structure, a rigid schema might reject the ingestion, causing data loss. MongoDB acts as a "highly-permissive" safety net, gracefully accepting structural variations to ensure **Zero Data Loss** until the primary system is restored or updated.
 
-5.  **Orchestration:** Apache Airflow manages the workflow.
-6.  **Visualization:** PowerBI connected to the database.
+5.  **Orchestration:** Apache Airflow manages the workflow (DAG `mastodon_pipeline`).
+6.  **Visualization:** **Streamlit** dashboard (`dashboard_bi.py`) and **Power BI** (CSV export from Cassandra / MongoDB).
 
 ---
 
@@ -73,10 +96,10 @@ The infrastructure is defined in `docker-compose.yml`:
 | Service Name | Description | Port (Host) |
 | :--- | :--- | :--- |
 | **broker** | Kafka Message Broker | 9092 / 9093 |
-| **spark-master** | Spark Master Node | 8080 (UI) / 7077 |
-| **spark-worker** | Spark Worker Node | 8081 |
+| **spark-master** | Spark Master Node | 8083 (UI) / 7077 |
+| **spark-worker** | Spark Worker Node | 8084 |
 | **cassandra** | Primary NoSQL Sink | 9042 |
-| **mongodb** | Fallback Database | 27017 |
+| **mongodb** | Fallback Database | 27018 |
 | **airflow-webserver** | Airflow UI | 8091 |
 | **airflow-scheduler** | Airflow Scheduler | - |
 
@@ -102,7 +125,7 @@ Running on Spark, this engine handles the complexity:
 
 ## 📈 Visualization
 
-Data processed by Spark is visualized in PowerBI to track sentiment trends and topic virality.
+Data processed by Spark can be explored with **Streamlit** (real-time monitoring) and **Power BI** (sentiment trends and topic virality).
 
 ![PowerBI Dashboard](powerbi.jpeg)
 
