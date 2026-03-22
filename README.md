@@ -142,22 +142,5 @@ You can monitor the health and status of the pipeline using the following interf
 
 ---
 
-## 👤 Maintainer (this fork)
 
-* **[@saghro](https://github.com/saghro)** — owner of this repository, ongoing changes and documentation.
 
-## 🙏 Acknowledgments (original authors)
-
-The initial pipeline was jointly designed and developed by:
-
-* [EL RHERBI Mohamed Amine](https://github.com/medamineelrherbi)
-* [CHATRAOUI Hamza](https://github.com/chatraouihamza)
-* [DHAH Chaimaa](https://github.com/ChaimaaDhah)
-* [EL Houdaigui Maria](https://github.com/mariaelhoudaigui)
-* [AMMAM Yassir](https://github.com/yassiraamam)
-
-Original upstream context: group Big Data project (Reddit pipeline). This fork adds Mastodon ingestion, demo scripts, LaTeX docs, and other personal updates.
-
-## 📝 License
-
-This project is open-source and available under the [MIT License](https://opensource.org/licenses/MIT).
